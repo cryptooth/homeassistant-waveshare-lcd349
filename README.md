@@ -14,6 +14,17 @@ control panel — all configurable from the HA UI without re-flashing.
   <img src="docs/landscape.svg" alt="Dashboard view" height="160">
 </p>
 
+## Demo
+
+<p align="center">
+  <video src="docs/homeassistant-waveshare-lcd349.mp4" controls width="400">
+    Your browser doesn't render embedded video.
+    <a href="docs/homeassistant-waveshare-lcd349.mp4">Download the demo</a>.
+  </video>
+</p>
+
+> If the video doesn't load inline, [click here to download](docs/homeassistant-waveshare-lcd349.mp4).
+
 ## Features
 
 - **HA-native configuration** — add pages and entities from a HA UI form, no
