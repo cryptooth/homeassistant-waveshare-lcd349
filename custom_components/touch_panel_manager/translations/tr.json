@@ -1,0 +1,47 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Touch Panel Manager",
+        "description": "Yeni bir touch panel cihazı oluştur. Buton ve sensör atamalarını cihaz oluşturduktan sonra 'Configure' ile yaparsın.",
+        "data": {
+          "name": "Panel adı"
+        },
+        "data_description": {
+          "name": "Cihazı tanımlamak için kısa bir isim (örn. 'Salon Paneli')."
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Bu isimde bir panel zaten yapılandırılmış."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Panel yapılandırması",
+        "description": "Buton slotlarını ve sıcaklık sensorlarını seç. Boş bırakılan butonlar gösterilmez.",
+        "data": {
+          "outdoor_temp": "Dış sıcaklık sensoru",
+          "indoor_temp": "İç sıcaklık sensoru",
+          "slot_1_entity": "1. Buton — Entity",
+          "slot_1_label": "1. Buton — Etiket",
+          "slot_2_entity": "2. Buton — Entity",
+          "slot_2_label": "2. Buton — Etiket",
+          "slot_3_entity": "3. Buton — Entity",
+          "slot_3_label": "3. Buton — Etiket",
+          "slot_4_entity": "4. Buton — Entity",
+          "slot_4_label": "4. Buton — Etiket",
+          "slot_5_entity": "5. Buton — Entity",
+          "slot_5_label": "5. Buton — Etiket",
+          "slot_6_entity": "6. Buton — Entity",
+          "slot_6_label": "6. Buton — Etiket",
+          "slot_7_entity": "7. Buton — Entity",
+          "slot_7_label": "7. Buton — Etiket",
+          "slot_8_entity": "8. Buton — Entity",
+          "slot_8_label": "8. Buton — Etiket"
+        }
+      }
+    }
+  }
+}

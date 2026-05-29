@@ -1,0 +1,13 @@
+{
+  "domain": "touch_panel_manager",
+  "name": "Touch Panel Manager",
+  "version": "0.7.2",
+  "config_flow": true,
+  "documentation": "https://github.com/cryptooth/homeassistant-waveshare-lcd349",
+  "issue_tracker": "https://github.com/cryptooth/homeassistant-waveshare-lcd349/issues",
+  "dependencies": [],
+  "codeowners": ["@cryptooth"],
+  "iot_class": "local_push",
+  "integration_type": "service",
+  "requirements": []
+}

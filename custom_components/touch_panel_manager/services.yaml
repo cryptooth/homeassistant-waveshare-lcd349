@@ -1,0 +1,38 @@
+panel_action:
+  name: Panel action (dispatch)
+  description: >
+    Dispatcher service called by ESPHome touch panel devices.
+    Applies toggle or turn_on based on the entity's domain.
+  fields:
+    entity_id:
+      name: Entity ID
+      description: Entity to trigger (e.g. light.kitchen, scene.movie).
+      required: true
+      example: light.kitchen_ceiling
+      selector:
+        text:
+
+set_current_page:
+  name: Set current page
+  description: >
+    Called by ESPHome touch panel devices to change the active page.
+    The integration updates its attributes to reflect the new page's slots.
+  fields:
+    config_entity_id:
+      name: Config sensor entity
+      description: The panel's config sensor (e.g. sensor.touch_panel_config).
+      required: true
+      example: sensor.touch_panel_config
+      selector:
+        entity:
+          domain: sensor
+    page_index:
+      name: Page index
+      description: Zero-based page index (0 = first page).
+      required: true
+      example: 0
+      selector:
+        number:
+          min: 0
+          max: 49
+          mode: box

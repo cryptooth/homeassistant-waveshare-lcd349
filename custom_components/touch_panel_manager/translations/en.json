@@ -1,0 +1,91 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Touch Panel Manager",
+        "description": "Create a new touch panel device. Configure pages and sensors via 'Configure' after creation.",
+        "data": {
+          "name": "Panel name"
+        },
+        "data_description": {
+          "name": "A short name to identify this device (e.g. 'Living Room Panel')."
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "A panel with this name is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Touch Panel — Configuration",
+        "description": "Pick what you want to do, then choose 'Save & close' when finished.",
+        "data": {
+          "action": "Action"
+        }
+      },
+      "add_page": {
+        "title": "Add new page",
+        "description": "Up to 8 entities per page. Lights/switches/scenes/scripts become action buttons. Sensors/binary_sensors are shown as live values.",
+        "data": {
+          "title": "Page title",
+          "slot_1_entity": "Slot 1 — Entity",
+          "slot_1_label": "Slot 1 — Label",
+          "slot_2_entity": "Slot 2 — Entity",
+          "slot_2_label": "Slot 2 — Label",
+          "slot_3_entity": "Slot 3 — Entity",
+          "slot_3_label": "Slot 3 — Label",
+          "slot_4_entity": "Slot 4 — Entity",
+          "slot_4_label": "Slot 4 — Label",
+          "slot_5_entity": "Slot 5 — Entity",
+          "slot_5_label": "Slot 5 — Label",
+          "slot_6_entity": "Slot 6 — Entity",
+          "slot_6_label": "Slot 6 — Label",
+          "slot_7_entity": "Slot 7 — Entity",
+          "slot_7_label": "Slot 7 — Label",
+          "slot_8_entity": "Slot 8 — Entity",
+          "slot_8_label": "Slot 8 — Label"
+        }
+      },
+      "edit_page": {
+        "title": "Edit page",
+        "description": "Editing: {page_title}",
+        "data": {
+          "title": "Page title",
+          "slot_1_entity": "Slot 1 — Entity",
+          "slot_1_label": "Slot 1 — Label",
+          "slot_2_entity": "Slot 2 — Entity",
+          "slot_2_label": "Slot 2 — Label",
+          "slot_3_entity": "Slot 3 — Entity",
+          "slot_3_label": "Slot 3 — Label",
+          "slot_4_entity": "Slot 4 — Entity",
+          "slot_4_label": "Slot 4 — Label",
+          "slot_5_entity": "Slot 5 — Entity",
+          "slot_5_label": "Slot 5 — Label",
+          "slot_6_entity": "Slot 6 — Entity",
+          "slot_6_label": "Slot 6 — Label",
+          "slot_7_entity": "Slot 7 — Entity",
+          "slot_7_label": "Slot 7 — Label",
+          "slot_8_entity": "Slot 8 — Entity",
+          "slot_8_label": "Slot 8 — Label"
+        }
+      },
+      "confirm_delete": {
+        "title": "Delete page",
+        "description": "Are you sure you want to delete '{page_title}'? Tick the checkbox and submit.",
+        "data": {
+          "confirm": "Yes, delete this page"
+        }
+      },
+      "sensors": {
+        "title": "Temperature sensors",
+        "description": "Shown on the landscape dashboard.",
+        "data": {
+          "outdoor_temp": "Outdoor temperature sensor",
+          "indoor_temp": "Indoor temperature sensor"
+        }
+      }
+    }
+  }
+}

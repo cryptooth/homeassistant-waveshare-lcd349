@@ -1,0 +1,30 @@
+# Secrets — never commit
+secrets.yaml
+
+# ESPHome build artifacts
+.esphome/
+.pioenvs/
+.piolibdeps/
+
+# Python venv
+.venv/
+__pycache__/
+*.pyc
+
+# Vendor SDK (downloaded separately from Waveshare)
+ESP32-S3-Touch-LCD-3.49-main/
+
+# MDI font (downloaded by user, ~600 KB — see README)
+fonts/materialdesignicons.ttf
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log

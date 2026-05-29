@@ -1,0 +1,1534 @@
+# =============================================================================
+#  Waveshare ESP32-S3-Touch-LCD-3.49  →  Home Assistant dokunmatik kumanda
+#  Yatay/dikey çalışan, IMU ile yön algılayan, ışık + sahne kontrollü panel.
+#
+#  Donanım pinleri Waveshare örnek kodundan (user_config.h) alındı.
+#  Display: AXS15231 (QSPI), Touch: AXS15231 (I2C 0x3b), IMU: QMI8658 (I2C 0x6b),
+#  RTC: PCF85063 (I2C 0x51), IO Expander: TCA9554 (I2C 0x20), Codec, SD, Pil.
+#
+#  KURULUM ADIMLARI README.md dosyasında.
+# =============================================================================
+
+substitutions:
+  device_name: "ha-touch-panel"
+  friendly_name: "HA Touch Panel"
+  # ───────── Touch Panel Manager entity'leri (HA custom integration)
+  # HA'da Settings → Devices → Touch Panel Manager → <panel adın> üzerinden bul.
+  # Üç entity: config (8 slot için flat attribute'lar), outdoor proxy, indoor proxy.
+  panel_config_entity:  "sensor.touch_panel_config"
+  panel_outdoor_proxy:  "sensor.touch_panel_outdoor_temp"
+  panel_indoor_proxy:   "sensor.touch_panel_indoor_temp"
+  date_entity:          "sensor.date"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  min_version: 2025.5.0
+  on_boot:
+    - priority: 600
+      then:
+        - light.turn_on:           # ekran arka ışığı
+            id: backlight
+            brightness: 80%
+    # TCA9554 power latch + QMI8658 IMU init (priority -100 → i2c bus'tan sonra)
+    - priority: -100
+      then:
+        - lambda: |-
+            auto *bus = id(bus_esp);
+
+            // ─── TCA9554 power latch (pin 6 HIGH → USB çıkınca bataryadan beslenir)
+            // TCA9554: 0x00=in, 0x01=out, 0x03=config (0=output,1=input). I2C addr 0x20.
+            uint8_t cmd[2];
+            uint8_t r;
+            // Config: pin 6'yı output yap, diğerlerini bozma (read-modify-write)
+            r = 0x03; uint8_t cfg = 0xFF;
+            bus->write(0x20, &r, 1, false);
+            bus->read(0x20, &cfg, 1);
+            cfg &= ~(1 << 6);
+            cmd[0] = 0x03; cmd[1] = cfg;
+            bus->write(0x20, cmd, 2);
+            // Output: pin 6'yı HIGH yap
+            r = 0x01; uint8_t out = 0;
+            bus->write(0x20, &r, 1, false);
+            bus->read(0x20, &out, 1);
+            out |= (1 << 6);
+            cmd[0] = 0x01; cmd[1] = out;
+            bus->write(0x20, cmd, 2);
+            ESP_LOGI("power", "TCA9554 power latch ON (pin6=HIGH, batarya beslemesi aktif)");
+
+            // ─── QMI8658 IMU
+            uint8_t reg2 = 0x00, who = 0;
+            if (bus->write(0x6B, &reg2, 1, false) != esphome::i2c::ERROR_OK ||
+                bus->read(0x6B, &who, 1) != esphome::i2c::ERROR_OK) {
+              ESP_LOGW("imu", "QMI8658 cevap vermiyor (i2c err)");
+              return;
+            }
+            ESP_LOGI("imu", "QMI8658 WHO_AM_I=0x%02X (beklenen 0x05)", who);
+            // CTRL1=0x40 : auto-increment register address (sequential read için)
+            cmd[0] = 0x02; cmd[1] = 0x40; bus->write(0x6B, cmd, 2);
+            // CTRL2=0x16 : accel ±4g (aFS=001), ODR 125Hz (aODR=0110)
+            cmd[0] = 0x03; cmd[1] = 0x16; bus->write(0x6B, cmd, 2);
+            // CTRL7=0x01 : sadece accelerometer aktif (gyro şimdilik kapalı, güç tasarrufu)
+            cmd[0] = 0x08; cmd[1] = 0x01; bus->write(0x6B, cmd, 2);
+            ESP_LOGI("imu", "QMI8658 init OK");
+
+esp32:
+  board: esp32-s3-devkitc-1
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+# AXS15231 framebuffer + LVGL için PSRAM şart
+psram:
+  mode: octal
+  speed: 80MHz
+
+# ─────────────────────────────────────────── WiFi / API / OTA
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${device_name} Fallback"
+    password: "kurulum1234"
+
+captive_portal:
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  # HA bağlandığında / yeniden bağlandığında initial state push'larından sonra
+  # buton checked durumlarını manuel sync et — binary_sensor'ün on_state'i bazen
+  # initial subscribe'da yutuluyor, buton stale kalıyor.
+  on_client_connected:
+    - delay: 2s
+    - script.execute: refresh_button_states
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# ─────────────────────────────────────────── Dış (External) component'lar
+# NOT: dala318/esphome-qmi8658 yeni ESP-IDF i2c_master (NG) driver kullanıyor,
+# ESPHome'un i2c: component'i ise legacy driver. Aynı anda çalışmıyorlar
+# ("CONFLICT! driver_ng is not allowed to be used with this old driver" panic).
+# IMU'yu şimdilik kapalı tutuyoruz; legacy i2c uyumlu bir alternatifle döneriz.
+# external_components:
+#   - source: github://dala318/esphome-qmi8658
+#     components: [qmi8658]
+
+# ─────────────────────────────────────────── Custom fontlar
+# KodeMonoRegular.ttf'yi 140pt'ye render edip büyük saat fontu olarak kullanıyoruz.
+font:
+  - id: font_clock_xl
+    file: "fonts/KodeMonoBold.ttf"
+    size: 100
+    glyphs: "0123456789:-"
+
+  # Material Design Icons — slot ikonları için
+  # Sadece kullanılan glyph'leri dahil et, font ufak kalır
+  - id: font_icons
+    file: "fonts/materialdesignicons.ttf"
+    size: 32
+    glyphs: [
+      "\U000F0335",  # lightbulb
+      "\U000F06D5",  # toggle-switch-outline
+      "\U000F0521",  # toggle-switch (filled)
+      "\U000F040A",  # play-circle-outline (scene/media)
+      "\U000F0BC1",  # script-text-outline
+      "\U000F0A22",  # robot (automation)
+      "\U000F0210",  # fan
+      "\U000F1486",  # window-shutter (cover)
+      "\U000F0D91",  # motion-sensor (binary_sensor)
+      "\U000F050F",  # thermometer
+      "\U000F058C",  # water-percent (humidity)
+      "\U000F0079",  # battery
+      "\U000F0AF6",  # flash (power/voltage)
+      "\U000F0274",  # lightning-bolt (energy)
+      "\U000F0260",  # gauge (pressure)
+      "\U000F0625",  # help-circle-outline (default)
+      "\U000F0141",  # chevron-left (prev page)
+      "\U000F0142",  # chevron-right (next page)
+    ]
+
+# ─────────────────────────────────────────── İkonlar (PNG → LVGL image)
+image:
+  - id: img_wifi_on
+    file: "images/wifi_on.png"
+    type: RGB565
+    transparency: alpha_channel
+  - id: img_wifi_off
+    file: "images/wifi_off.png"
+    type: RGB565
+    transparency: alpha_channel
+  - id: img_battery
+    file: "images/battery.png"
+    type: RGB565
+    transparency: alpha_channel
+
+# ─────────────────────────────────────────── SPI (Quad / QSPI) — Display
+spi:
+  id: quad_spi
+  type: quad
+  clk_pin: GPIO10
+  data_pins: [GPIO11, GPIO12, GPIO13, GPIO14]
+
+# ─────────────────────────────────────────── I2C — Touch (ayrı bus)
+i2c:
+  - id: bus_touch
+    sda: GPIO17
+    scl: GPIO18
+    frequency: 400kHz
+    scan: true   # boot log'unda 0x3b (touch) görünmeli
+
+  # ─────────────────────────────────────── I2C — Genel (IMU, RTC, IO expander, codec)
+  - id: bus_esp
+    sda: GPIO47
+    scl: GPIO48
+    frequency: 400kHz
+    scan: true   # boot'ta ne var ne yok log'a düşsün
+
+# ─────────────────────────────────────────── Arka ışık (PWM)
+output:
+  - platform: ledc
+    pin: GPIO8
+    id: backlight_pwm
+    frequency: 5000Hz
+    inverted: true   # HA'da ON = ekran aydınlık olacak
+
+light:
+  - platform: monochromatic
+    id: backlight
+    name: "Ekran Arka Işığı"
+    output: backlight_pwm
+    restore_mode: ALWAYS_ON
+    default_transition_length: 200ms
+
+# ─────────────────────────────────────────── Ekran (AXS15231, 172x640 portrait)
+display:
+  - platform: qspi_dbi
+    id: lcd
+    model: AXS15231
+    spi_id: quad_spi
+    cs_pin: GPIO9
+    reset_pin: GPIO21
+    data_rate: 40MHz
+    spi_mode: mode0
+    dimensions:
+      width: 172
+      height: 640
+    color_order: rgb
+    invert_colors: false
+    brightness: 255
+    draw_from_origin: true
+    draw_rounding: 16           # AXS15231 partial-draw hizalama (alt kenar artifact'larını engeller)
+    update_interval: never        # LVGL kendi tetikler
+    auto_clear_enabled: false
+
+# ─────────────────────────────────────────── Dokunmatik
+touchscreen:
+  - platform: axs15231
+    id: touch
+    i2c_id: bus_touch
+    display: lcd
+    transform:
+      mirror_x: false
+      mirror_y: true
+      swap_xy: true
+    # Swipe gesture: yatay 60+ px hareketi sayfa geçişi olarak yorumla.
+    # LVGL kendi click'lerini movement < threshold koşulunda fireledği için
+    # tap'lar burayla çakışmaz (büyük hareket = swipe, küçük = click).
+    on_touch:
+      - lambda: |-
+          id(touch_start_x) = touch.x;
+          id(touch_start_y) = touch.y;
+          id(touch_last_x) = touch.x;
+          id(touch_last_y) = touch.y;
+          id(touch_start_ms) = millis();
+          id(is_swiping) = false;
+          ESP_LOGD("swipe", "touch start (%d, %d)", touch.x, touch.y);
+    on_update:
+      - lambda: |-
+          if (touches.empty()) return;
+          const auto &t = touches.front();
+          id(touch_last_x) = t.x;
+          id(touch_last_y) = t.y;
+          // Belirgin yatay hareket varsa swipe flag'ini set et
+          // → buton on_short_click'i bunu görüp tıklamayı yutar
+          int dx = abs((int) t.x - (int) id(touch_start_x));
+          int dy = abs((int) t.y - (int) id(touch_start_y));
+          if (dx > 30 && dx > dy) id(is_swiping) = true;
+    on_release:
+      - lambda: |-
+          if (id(touch_start_x) < 0) return;
+          int dx = (int) id(touch_last_x) - (int) id(touch_start_x);
+          int dy = (int) id(touch_last_y) - (int) id(touch_start_y);
+          uint32_t dt = millis() - id(touch_start_ms);
+          ESP_LOGI("swipe", "release dx=%d dy=%d dt=%u", dx, dy, (unsigned) dt);
+          id(touch_start_x) = -1;  // reset
+
+          // Swipe: <800ms, |dx|>40, |dy|<80 (gevşetildi)
+          if (dt < 800 && abs(dx) > 40 && abs(dy) < 80) {
+            ESP_LOGI("swipe", "→ %s", dx < 0 ? "next" : "prev");
+            if (dx < 0) id(navigate_next).execute();
+            else        id(navigate_prev).execute();
+          }
+
+# ─────────────────────────────────────────── IMU (QMI8658) — raw i2c lambda
+# Init on_boot priority:-100 bloğunda. Burada accel x/y/z'yi 500ms'de bir
+# okuyup template sensor'lara yazıyoruz; HA'da görünür, lambda'larda kullanılır.
+sensor:
+  - platform: template
+    name: "IMU Accel X"
+    id: accel_x
+    unit_of_measurement: "g"
+    accuracy_decimals: 2
+  - platform: template
+    name: "IMU Accel Y"
+    id: accel_y
+    unit_of_measurement: "g"
+    accuracy_decimals: 2
+  - platform: template
+    name: "IMU Accel Z"
+    id: accel_z
+    unit_of_measurement: "g"
+    accuracy_decimals: 2
+
+  # ─── Batarya voltajı (GPIO4, 1/3 divider, x3 ile gerçek pil voltajı)
+  - platform: adc
+    pin: GPIO4
+    id: batt_voltage
+    name: "Batarya Voltajı"
+    update_interval: 30s
+    attenuation: 12db
+    accuracy_decimals: 2
+    unit_of_measurement: "V"
+    filters:
+      - multiply: 3.0       # ekranda 1/3 divider var
+      - sliding_window_moving_average:
+          window_size: 5
+          send_every: 5
+
+  # ─── Batarya yüzdesi (Li-ion 18650 lineer yaklaşım: 3.3V=%0, 4.2V=%100)
+  - platform: template
+    name: "Batarya"
+    id: batt_percent
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: |-
+      float v = id(batt_voltage).state;
+      if (isnan(v)) return {};
+      float pct = (v - 3.3f) / (4.2f - 3.3f) * 100.0f;
+      if (pct < 0) pct = 0;
+      if (pct > 100) pct = 100;
+      return pct;
+    on_value:
+      - lvgl.label.update:
+          id: lbl_batt_pct
+          text: !lambda |-
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%d%%", (int) x);
+            return std::string(buf);
+      - lvgl.bar.update:
+          id: bar_batt
+          value: !lambda 'return (int) x;'
+          indicator:
+            bg_color: !lambda |-
+              if (x < 20) return lv_color_hex(0xef4444);   // kırmızı
+              if (x < 50) return lv_color_hex(0xfbbf24);   // sarı
+              return lv_color_hex(0x10b981);                // yeşil
+
+# ─────────────────────────────────────────── HA'dan çekilen entity'ler (state import)
+# (text_sensor bloğu aşağıda IMU yön sensoru ile birleşik tanımlandı.)
+
+binary_sensor:
+  # WiFi bağlantı durumu — ikon swap için
+  - platform: status
+    name: "WiFi"
+    id: wifi_connected
+    on_state:
+      - if:
+          condition:
+            lambda: 'return x;'
+          then:
+            - lvgl.image.update:
+                id: img_wifi_widget
+                src: img_wifi_on
+          else:
+            - lvgl.image.update:
+                id: img_wifi_widget
+                src: img_wifi_off
+
+  # ──── Touch Panel Manager slot state proxy'leri (v0.4)
+  # Her slot için HA tarafında bir binary_sensor proxy var; o slot'a atanmış
+  # entity 'açık' olduğunda binary_sensor 'on' olur. Cihaz bunu görüp butonu
+  # checked (sarı) state'e geçirir.
+  - platform: homeassistant
+    id: slot1_state
+    entity_id: binary_sensor.touch_panel_slot_1_state
+    on_state:
+      - lvgl.widget.update:
+          id: btn_l1
+          state: { checked: !lambda 'return x;' }
+  - platform: homeassistant
+    id: slot2_state
+    entity_id: binary_sensor.touch_panel_slot_2_state
+    on_state:
+      - lvgl.widget.update:
+          id: btn_l2
+          state: { checked: !lambda 'return x;' }
+  - platform: homeassistant
+    id: slot3_state
+    entity_id: binary_sensor.touch_panel_slot_3_state
+    on_state:
+      - lvgl.widget.update:
+          id: btn_l3
+          state: { checked: !lambda 'return x;' }
+  - platform: homeassistant
+    id: slot4_state
+    entity_id: binary_sensor.touch_panel_slot_4_state
+    on_state:
+      - lvgl.widget.update:
+          id: btn_l4
+          state: { checked: !lambda 'return x;' }
+  - platform: homeassistant
+    id: slot5_state
+    entity_id: binary_sensor.touch_panel_slot_5_state
+    on_state:
+      - lvgl.widget.update:
+          id: btn_l5
+          state: { checked: !lambda 'return x;' }
+  - platform: homeassistant
+    id: slot6_state
+    entity_id: binary_sensor.touch_panel_slot_6_state
+    on_state:
+      - lvgl.widget.update:
+          id: btn_l6
+          state: { checked: !lambda 'return x;' }
+  - platform: homeassistant
+    id: slot7_state
+    entity_id: binary_sensor.touch_panel_slot_7_state
+    on_state:
+      - lvgl.widget.update:
+          id: btn_l7
+          state: { checked: !lambda 'return x;' }
+  - platform: homeassistant
+    id: slot8_state
+    entity_id: binary_sensor.touch_panel_slot_8_state
+    on_state:
+      - lvgl.widget.update:
+          id: btn_l8
+          state: { checked: !lambda 'return x;' }
+  # Scene/script slot kullanırsan zaten hep "kapalı" gösterir — sorun yok.
+
+# ─────────────────────────────────────────── Yön algılama
+# Her 500ms QMI8658'den raw accel oku → template sensor'lara publish + yön tahmini.
+# Yön etiketleri ham haliyle (yatay/dikey/yan). Cihazı çevirerek log'dan ax/ay/az
+# değerlerini doğrula, sonra dikey↔yatay sayfa geçişini ekleriz.
+
+text_sensor:
+  - platform: homeassistant
+    id: ha_time
+    entity_id: sensor.time
+    on_value:
+      - lvgl.label.update:
+          id: lbl_clock
+          text: !lambda 'return x.c_str();'
+      - lvgl.label.update:
+          id: lbl_clock_big
+          text: !lambda 'return x.c_str();'
+
+  - platform: homeassistant
+    id: ha_date
+    entity_id: ${date_entity}
+    on_value:
+      - lvgl.label.update:
+          id: lbl_date
+          text: !lambda 'return x.c_str();'
+
+  # ──── Touch Panel Manager slot abonelikleri (entity + label per slot)
+  # 7 slot kullanıyoruz (4 ana buton + 3 sahne yuvası); 8. slot reserve.
+  # ──── Touch Panel Manager slot abonelikleri (v0.5: main+sub text)
+  # 8 slot tam → 24 text_sensor (entity + main_text + sub_text per slot)
+  - platform: homeassistant
+    id: slot1_entity
+    entity_id: ${panel_config_entity}
+    attribute: slot_1_entity
+  - platform: homeassistant
+    id: slot1_main
+    entity_id: ${panel_config_entity}
+    attribute: slot_1_main_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l1_main, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot1_sub
+    entity_id: ${panel_config_entity}
+    attribute: slot_1_sub_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l1_sub, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot1_icon
+    entity_id: ${panel_config_entity}
+    attribute: slot_1_icon
+    on_value:
+      - lvgl.label.update: { id: lbl_l1_icon, text: !lambda 'return x.c_str();' }
+
+  - platform: homeassistant
+    id: slot2_entity
+    entity_id: ${panel_config_entity}
+    attribute: slot_2_entity
+  - platform: homeassistant
+    id: slot2_main
+    entity_id: ${panel_config_entity}
+    attribute: slot_2_main_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l2_main, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot2_sub
+    entity_id: ${panel_config_entity}
+    attribute: slot_2_sub_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l2_sub, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot2_icon
+    entity_id: ${panel_config_entity}
+    attribute: slot_2_icon
+    on_value:
+      - lvgl.label.update: { id: lbl_l2_icon, text: !lambda 'return x.c_str();' }
+
+  - platform: homeassistant
+    id: slot3_entity
+    entity_id: ${panel_config_entity}
+    attribute: slot_3_entity
+  - platform: homeassistant
+    id: slot3_main
+    entity_id: ${panel_config_entity}
+    attribute: slot_3_main_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l3_main, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot3_sub
+    entity_id: ${panel_config_entity}
+    attribute: slot_3_sub_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l3_sub, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot3_icon
+    entity_id: ${panel_config_entity}
+    attribute: slot_3_icon
+    on_value:
+      - lvgl.label.update: { id: lbl_l3_icon, text: !lambda 'return x.c_str();' }
+
+  - platform: homeassistant
+    id: slot4_entity
+    entity_id: ${panel_config_entity}
+    attribute: slot_4_entity
+  - platform: homeassistant
+    id: slot4_main
+    entity_id: ${panel_config_entity}
+    attribute: slot_4_main_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l4_main, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot4_sub
+    entity_id: ${panel_config_entity}
+    attribute: slot_4_sub_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l4_sub, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot4_icon
+    entity_id: ${panel_config_entity}
+    attribute: slot_4_icon
+    on_value:
+      - lvgl.label.update: { id: lbl_l4_icon, text: !lambda 'return x.c_str();' }
+
+  - platform: homeassistant
+    id: slot5_entity
+    entity_id: ${panel_config_entity}
+    attribute: slot_5_entity
+  - platform: homeassistant
+    id: slot5_main
+    entity_id: ${panel_config_entity}
+    attribute: slot_5_main_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l5_main, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot5_sub
+    entity_id: ${panel_config_entity}
+    attribute: slot_5_sub_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l5_sub, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot5_icon
+    entity_id: ${panel_config_entity}
+    attribute: slot_5_icon
+    on_value:
+      - lvgl.label.update: { id: lbl_l5_icon, text: !lambda 'return x.c_str();' }
+
+  - platform: homeassistant
+    id: slot6_entity
+    entity_id: ${panel_config_entity}
+    attribute: slot_6_entity
+  - platform: homeassistant
+    id: slot6_main
+    entity_id: ${panel_config_entity}
+    attribute: slot_6_main_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l6_main, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot6_sub
+    entity_id: ${panel_config_entity}
+    attribute: slot_6_sub_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l6_sub, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot6_icon
+    entity_id: ${panel_config_entity}
+    attribute: slot_6_icon
+    on_value:
+      - lvgl.label.update: { id: lbl_l6_icon, text: !lambda 'return x.c_str();' }
+
+  - platform: homeassistant
+    id: slot7_entity
+    entity_id: ${panel_config_entity}
+    attribute: slot_7_entity
+  - platform: homeassistant
+    id: slot7_main
+    entity_id: ${panel_config_entity}
+    attribute: slot_7_main_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l7_main, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot7_sub
+    entity_id: ${panel_config_entity}
+    attribute: slot_7_sub_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l7_sub, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot7_icon
+    entity_id: ${panel_config_entity}
+    attribute: slot_7_icon
+    on_value:
+      - lvgl.label.update: { id: lbl_l7_icon, text: !lambda 'return x.c_str();' }
+
+  - platform: homeassistant
+    id: slot8_entity
+    entity_id: ${panel_config_entity}
+    attribute: slot_8_entity
+  - platform: homeassistant
+    id: slot8_main
+    entity_id: ${panel_config_entity}
+    attribute: slot_8_main_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l8_main, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot8_sub
+    entity_id: ${panel_config_entity}
+    attribute: slot_8_sub_text
+    on_value:
+      - lvgl.label.update: { id: lbl_l8_sub, text: !lambda 'return x.c_str();' }
+  - platform: homeassistant
+    id: slot8_icon
+    entity_id: ${panel_config_entity}
+    attribute: slot_8_icon
+    on_value:
+      - lvgl.label.update: { id: lbl_l8_icon, text: !lambda 'return x.c_str();' }
+
+  # ──── Page metadata (v0.7)
+  - platform: homeassistant
+    id: page_current
+    entity_id: ${panel_config_entity}
+    attribute: current_page
+  - platform: homeassistant
+    id: page_count
+    entity_id: ${panel_config_entity}
+    attribute: pages_count
+    on_value:
+      - lvgl.label.update:
+          id: lbl_page_counter
+          text: !lambda |-
+            int curr = atoi(id(page_current).state.c_str());
+            int total = atoi(x.c_str());
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d/%d", curr + 1, total);
+            return std::string(buf);
+  - platform: homeassistant
+    id: page_title
+    entity_id: ${panel_config_entity}
+    attribute: current_page_title
+    on_value:
+      - lvgl.label.update: { id: lbl_page_title, text: !lambda 'return x.c_str();' }
+      # current_page değiştiğinde counter'ı yeniden hesapla
+      - lvgl.label.update:
+          id: lbl_page_counter
+          text: !lambda |-
+            int curr = atoi(id(page_current).state.c_str());
+            int total = atoi(id(page_count).state.c_str());
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d/%d", curr + 1, total);
+            return std::string(buf);
+      # Sayfa değişti → binary_sensor'lar yeni entity'leri track edecek;
+      # 500ms sonra çıkıp gelmiş state'leri butonlara manuel sync et
+      - delay: 500ms
+      - script.execute: refresh_button_states
+
+  # ──── Temperature proxies
+  - platform: homeassistant
+    id: ha_outdoor_temp
+    entity_id: ${panel_outdoor_proxy}
+    on_value:
+      - lvgl.label.update:
+          id: lbl_out_temp
+          text: !lambda |-
+            char buf[16];
+            float v = strtof(x.c_str(), nullptr);
+            snprintf(buf, sizeof(buf), "%.1f°", v);
+            return std::string(buf);
+
+  - platform: homeassistant
+    id: ha_indoor_temp
+    entity_id: ${panel_indoor_proxy}
+    on_value:
+      - lvgl.label.update:
+          id: lbl_in_temp
+          text: !lambda |-
+            char buf[16];
+            float v = strtof(x.c_str(), nullptr);
+            snprintf(buf, sizeof(buf), "%.1f°", v);
+            return std::string(buf);
+
+  - platform: template
+    name: "Cihaz Yönü"
+    id: device_orientation
+
+globals:
+  # Swipe gesture tracking
+  - id: touch_start_x
+    type: int16_t
+    initial_value: '-1'
+  - id: touch_start_y
+    type: int16_t
+    initial_value: '-1'
+  - id: touch_last_x
+    type: int16_t
+    initial_value: '-1'
+  - id: touch_last_y
+    type: int16_t
+    initial_value: '-1'
+  - id: touch_start_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: is_swiping
+    type: bool
+    initial_value: 'false'
+
+script:
+  - id: show_remote_page
+    then:
+      - lvgl.page.show: scr_remote
+  - id: show_dashboard_page
+    then:
+      - lvgl.page.show: scr_dashboard
+
+  # 8 slot'un checked state'ini binary_sensor'lardan manuel sync et
+  # (HA reconnect'te initial state'i yutma sorununa karşı failsafe)
+  - id: refresh_button_states
+    then:
+      - lvgl.widget.update:
+          id: btn_l1
+          state: { checked: !lambda 'return id(slot1_state).state;' }
+      - lvgl.widget.update:
+          id: btn_l2
+          state: { checked: !lambda 'return id(slot2_state).state;' }
+      - lvgl.widget.update:
+          id: btn_l3
+          state: { checked: !lambda 'return id(slot3_state).state;' }
+      - lvgl.widget.update:
+          id: btn_l4
+          state: { checked: !lambda 'return id(slot4_state).state;' }
+      - lvgl.widget.update:
+          id: btn_l5
+          state: { checked: !lambda 'return id(slot5_state).state;' }
+      - lvgl.widget.update:
+          id: btn_l6
+          state: { checked: !lambda 'return id(slot6_state).state;' }
+      - lvgl.widget.update:
+          id: btn_l7
+          state: { checked: !lambda 'return id(slot7_state).state;' }
+      - lvgl.widget.update:
+          id: btn_l8
+          state: { checked: !lambda 'return id(slot8_state).state;' }
+
+  # Page navigation (kullanılır: prev/next butonu + swipe)
+  - id: navigate_prev
+    then:
+      - homeassistant.action:
+          action: touch_panel_manager.set_current_page
+          data:
+            config_entity_id: ${panel_config_entity}
+            page_index: !lambda |-
+              int curr = atoi(id(page_current).state.c_str());
+              int total = atoi(id(page_count).state.c_str());
+              if (total < 1) return std::string("0");
+              int prev = curr - 1;
+              if (prev < 0) prev = total - 1;
+              return std::to_string(prev);
+  - id: navigate_next
+    then:
+      - homeassistant.action:
+          action: touch_panel_manager.set_current_page
+          data:
+            config_entity_id: ${panel_config_entity}
+            page_index: !lambda |-
+              int curr = atoi(id(page_current).state.c_str());
+              int total = atoi(id(page_count).state.c_str());
+              if (total < 1) return std::string("0");
+              int next = curr + 1;
+              if (next >= total) next = 0;
+              return std::to_string(next);
+
+interval:
+  - interval: 500ms
+    then:
+      - lambda: |-
+          auto *bus = id(bus_esp);
+          uint8_t reg = 0x35;     // accel X low byte (sıralı okuma için)
+          if (bus->write(0x6B, &reg, 1, false) != esphome::i2c::ERROR_OK) return;
+          uint8_t buf[6];
+          if (bus->read(0x6B, buf, 6) != esphome::i2c::ERROR_OK) return;
+          int16_t rx = (int16_t)((buf[1] << 8) | buf[0]);
+          int16_t ry = (int16_t)((buf[3] << 8) | buf[2]);
+          int16_t rz = (int16_t)((buf[5] << 8) | buf[4]);
+          // ±4g aralığı: 32768 / 4 = 8192 LSB/g
+          float ax = rx / 8192.0f;
+          float ay = ry / 8192.0f;
+          float az = rz / 8192.0f;
+          id(accel_x).publish_state(ax);
+          id(accel_y).publish_state(ay);
+          id(accel_z).publish_state(az);
+
+          // Yön kararı: SADECE X ekseni belirleyici. Histerezis ile flicker önlendi.
+          // |X| > 0.6g → dikey ;  |X| < 0.4g → yatay ;  ara bölge: önceki kalır.
+          static int last_orient = -1;  // -1=henüz yok, 0=yatay, 1=dikey
+          float aax = fabs(ax);
+          int new_orient = last_orient;
+          if (aax > 0.6f)      new_orient = 1;
+          else if (aax < 0.4f) new_orient = 0;
+          if (new_orient != last_orient) {
+            last_orient = new_orient;
+            ESP_LOGI("orient", "Orientation changed → %s", new_orient == 1 ? "portrait" : "landscape");
+            if (new_orient == 1) id(show_remote_page).execute();
+            else                 id(show_dashboard_page).execute();
+          }
+          id(device_orientation).publish_state(new_orient == 1 ? "portrait" : "landscape");
+
+# ─────────────────────────────────────────── LVGL — Dikey kumanda UI
+lvgl:
+  buffer_size: 100%
+  full_refresh: true   # AXS15231 sadece 8-pixel boundary'de partial draw yapıyor (172 geniş, 8'e bölünmez).
+                       # Her render'da tüm 172×640'ı yeniden yolla → tearing/artifact kalmaz.
+  bg_color: 0x101418
+  text_font: montserrat_18
+  style_definitions:
+    - id: style_card
+      bg_color: 0x1c2128
+      bg_opa: COVER
+      radius: 14
+      border_width: 0
+      pad_all: 12
+      text_color: 0xffffff
+    - id: style_card_on
+      bg_color: 0xfbbf24
+      text_color: 0x1a1a1a
+    - id: style_title
+      text_font: montserrat_28
+      text_color: 0xffffff
+
+  pages:
+    - id: scr_remote
+      scrollable: false
+      scrollbar_mode: 'OFF'
+      widgets:
+        # Sağ-üst köşedeki inatçı piksel maskesi
+        - obj:
+            x: 168
+            y: 0
+            width: 4
+            height: 4
+            bg_color: 0x101418
+            bg_opa: COVER
+            border_width: 0
+            pad_all: 0
+
+        # ───── Üst bar (saat solda)
+        - obj:
+            x: 0
+            y: 0
+            width: 172
+            height: 50
+            bg_color: 0x0b0d10
+            bg_opa: COVER
+            border_width: 0
+            pad_all: 8
+            widgets:
+              - label:
+                  id: lbl_clock
+                  text: "--:--"
+                  align: LEFT_MID
+                  text_color: 0xffffff
+                  text_font: montserrat_22
+
+        # ═══════════════════════════ 2×4 GRID — 8 SLOT ═══════════════════════════
+        # Hücre: 77×125, her biri main_text + sub_text (sensor için değer + label)
+        # Row Y'leri: 60, 190, 320, 450 (gap 5 px)
+        # Col X'leri: 6 (sol), 89 (sağ)
+
+        # ─── Slot 1 (sol-üst)
+        - button:
+            id: btn_l1
+            x: 6
+            y: 60
+            width: 77
+            height: 125
+            styles: style_card
+            checkable: true
+            checked: { bg_color: 0xfbbf24, text_color: 0x1a1a1a }
+            widgets:
+              - label:
+                  id: lbl_l1_icon
+                  x: 0
+                  y: 5
+                  width: 53
+                  height: 40
+                  text: ""
+                  text_align: CENTER
+                  text_font: font_icons
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+              - label:
+                  id: lbl_l1_main
+                  x: 0
+                  y: 50
+                  width: 53
+                  height: 30
+                  text: "--"
+                  text_align: CENTER
+                  text_font: montserrat_14
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+                  long_mode: SCROLL_CIRCULAR
+              - label:
+                  id: lbl_l1_sub
+                  x: 0
+                  y: 80
+                  width: 53
+                  height: 20
+                  text: ""
+                  text_align: CENTER
+                  text_font: montserrat_12
+                  text_color: 0xa0a0a0
+                  checked: { text_color: 0x2a2a2a }
+            on_short_click:
+              - if:
+                  condition: { lambda: 'return !id(is_swiping);' }
+                  then:
+                    - homeassistant.action:
+                        action: touch_panel_manager.panel_action
+                        data:
+                          entity_id: !lambda 'return id(slot1_entity).state.c_str();'
+
+        # ─── Slot 2 (sağ-üst)
+        - button:
+            id: btn_l2
+            x: 89
+            y: 60
+            width: 77
+            height: 125
+            styles: style_card
+            checkable: true
+            checked: { bg_color: 0xfbbf24, text_color: 0x1a1a1a }
+            widgets:
+              - label:
+                  id: lbl_l2_icon
+                  x: 0
+                  y: 5
+                  width: 53
+                  height: 40
+                  text: ""
+                  text_align: CENTER
+                  text_font: font_icons
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+              - label:
+                  id: lbl_l2_main
+                  x: 0
+                  y: 50
+                  width: 53
+                  height: 30
+                  text: "--"
+                  text_align: CENTER
+                  text_font: montserrat_14
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+                  long_mode: SCROLL_CIRCULAR
+              - label:
+                  id: lbl_l2_sub
+                  x: 0
+                  y: 80
+                  width: 53
+                  height: 20
+                  text: ""
+                  text_align: CENTER
+                  text_font: montserrat_12
+                  text_color: 0xa0a0a0
+                  checked: { text_color: 0x2a2a2a }
+            on_short_click:
+              - if:
+                  condition: { lambda: 'return !id(is_swiping);' }
+                  then:
+                    - homeassistant.action:
+                        action: touch_panel_manager.panel_action
+                        data:
+                          entity_id: !lambda 'return id(slot2_entity).state.c_str();'
+
+        # ─── Slot 3 (sol, row 2)
+        - button:
+            id: btn_l3
+            x: 6
+            y: 190
+            width: 77
+            height: 125
+            styles: style_card
+            checkable: true
+            checked: { bg_color: 0xfbbf24, text_color: 0x1a1a1a }
+            widgets:
+              - label:
+                  id: lbl_l3_icon
+                  x: 0
+                  y: 5
+                  width: 53
+                  height: 40
+                  text: ""
+                  text_align: CENTER
+                  text_font: font_icons
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+              - label:
+                  id: lbl_l3_main
+                  x: 0
+                  y: 50
+                  width: 53
+                  height: 30
+                  text: "--"
+                  text_align: CENTER
+                  text_font: montserrat_14
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+                  long_mode: SCROLL_CIRCULAR
+              - label:
+                  id: lbl_l3_sub
+                  x: 0
+                  y: 80
+                  width: 53
+                  height: 20
+                  text: ""
+                  text_align: CENTER
+                  text_font: montserrat_12
+                  text_color: 0xa0a0a0
+                  checked: { text_color: 0x2a2a2a }
+            on_short_click:
+              - if:
+                  condition: { lambda: 'return !id(is_swiping);' }
+                  then:
+                    - homeassistant.action:
+                        action: touch_panel_manager.panel_action
+                        data:
+                          entity_id: !lambda 'return id(slot3_entity).state.c_str();'
+
+        # ─── Slot 4 (sağ, row 2)
+        - button:
+            id: btn_l4
+            x: 89
+            y: 190
+            width: 77
+            height: 125
+            styles: style_card
+            checkable: true
+            checked: { bg_color: 0xfbbf24, text_color: 0x1a1a1a }
+            widgets:
+              - label:
+                  id: lbl_l4_icon
+                  x: 0
+                  y: 5
+                  width: 53
+                  height: 40
+                  text: ""
+                  text_align: CENTER
+                  text_font: font_icons
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+              - label:
+                  id: lbl_l4_main
+                  x: 0
+                  y: 50
+                  width: 53
+                  height: 30
+                  text: "--"
+                  text_align: CENTER
+                  text_font: montserrat_14
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+                  long_mode: SCROLL_CIRCULAR
+              - label:
+                  id: lbl_l4_sub
+                  x: 0
+                  y: 80
+                  width: 53
+                  height: 20
+                  text: ""
+                  text_align: CENTER
+                  text_font: montserrat_12
+                  text_color: 0xa0a0a0
+                  checked: { text_color: 0x2a2a2a }
+            on_short_click:
+              - if:
+                  condition: { lambda: 'return !id(is_swiping);' }
+                  then:
+                    - homeassistant.action:
+                        action: touch_panel_manager.panel_action
+                        data:
+                          entity_id: !lambda 'return id(slot4_entity).state.c_str();'
+
+        # ─── Slot 5 (sol, row 3)
+        - button:
+            id: btn_l5
+            x: 6
+            y: 320
+            width: 77
+            height: 125
+            styles: style_card
+            checkable: true
+            checked: { bg_color: 0xfbbf24, text_color: 0x1a1a1a }
+            widgets:
+              - label:
+                  id: lbl_l5_icon
+                  x: 0
+                  y: 5
+                  width: 53
+                  height: 40
+                  text: ""
+                  text_align: CENTER
+                  text_font: font_icons
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+              - label:
+                  id: lbl_l5_main
+                  x: 0
+                  y: 50
+                  width: 53
+                  height: 30
+                  text: "--"
+                  text_align: CENTER
+                  text_font: montserrat_14
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+                  long_mode: SCROLL_CIRCULAR
+              - label:
+                  id: lbl_l5_sub
+                  x: 0
+                  y: 80
+                  width: 53
+                  height: 20
+                  text: ""
+                  text_align: CENTER
+                  text_font: montserrat_12
+                  text_color: 0xa0a0a0
+                  checked: { text_color: 0x2a2a2a }
+            on_short_click:
+              - if:
+                  condition: { lambda: 'return !id(is_swiping);' }
+                  then:
+                    - homeassistant.action:
+                        action: touch_panel_manager.panel_action
+                        data:
+                          entity_id: !lambda 'return id(slot5_entity).state.c_str();'
+
+        # ─── Slot 6 (sağ, row 3)
+        - button:
+            id: btn_l6
+            x: 89
+            y: 320
+            width: 77
+            height: 125
+            styles: style_card
+            checkable: true
+            checked: { bg_color: 0xfbbf24, text_color: 0x1a1a1a }
+            widgets:
+              - label:
+                  id: lbl_l6_icon
+                  x: 0
+                  y: 5
+                  width: 53
+                  height: 40
+                  text: ""
+                  text_align: CENTER
+                  text_font: font_icons
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+              - label:
+                  id: lbl_l6_main
+                  x: 0
+                  y: 50
+                  width: 53
+                  height: 30
+                  text: "--"
+                  text_align: CENTER
+                  text_font: montserrat_14
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+                  long_mode: SCROLL_CIRCULAR
+              - label:
+                  id: lbl_l6_sub
+                  x: 0
+                  y: 80
+                  width: 53
+                  height: 20
+                  text: ""
+                  text_align: CENTER
+                  text_font: montserrat_12
+                  text_color: 0xa0a0a0
+                  checked: { text_color: 0x2a2a2a }
+            on_short_click:
+              - if:
+                  condition: { lambda: 'return !id(is_swiping);' }
+                  then:
+                    - homeassistant.action:
+                        action: touch_panel_manager.panel_action
+                        data:
+                          entity_id: !lambda 'return id(slot6_entity).state.c_str();'
+
+        # ─── Slot 7 (sol, row 4)
+        - button:
+            id: btn_l7
+            x: 6
+            y: 450
+            width: 77
+            height: 125
+            styles: style_card
+            checkable: true
+            checked: { bg_color: 0xfbbf24, text_color: 0x1a1a1a }
+            widgets:
+              - label:
+                  id: lbl_l7_icon
+                  x: 0
+                  y: 5
+                  width: 53
+                  height: 40
+                  text: ""
+                  text_align: CENTER
+                  text_font: font_icons
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+              - label:
+                  id: lbl_l7_main
+                  x: 0
+                  y: 50
+                  width: 53
+                  height: 30
+                  text: "--"
+                  text_align: CENTER
+                  text_font: montserrat_14
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+                  long_mode: SCROLL_CIRCULAR
+              - label:
+                  id: lbl_l7_sub
+                  x: 0
+                  y: 80
+                  width: 53
+                  height: 20
+                  text: ""
+                  text_align: CENTER
+                  text_font: montserrat_12
+                  text_color: 0xa0a0a0
+                  checked: { text_color: 0x2a2a2a }
+            on_short_click:
+              - if:
+                  condition: { lambda: 'return !id(is_swiping);' }
+                  then:
+                    - homeassistant.action:
+                        action: touch_panel_manager.panel_action
+                        data:
+                          entity_id: !lambda 'return id(slot7_entity).state.c_str();'
+
+        # ─── Slot 8 (sağ, row 4)
+        - button:
+            id: btn_l8
+            x: 89
+            y: 450
+            width: 77
+            height: 125
+            styles: style_card
+            checkable: true
+            checked: { bg_color: 0xfbbf24, text_color: 0x1a1a1a }
+            widgets:
+              - label:
+                  id: lbl_l8_icon
+                  x: 0
+                  y: 5
+                  width: 53
+                  height: 40
+                  text: ""
+                  text_align: CENTER
+                  text_font: font_icons
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+              - label:
+                  id: lbl_l8_main
+                  x: 0
+                  y: 50
+                  width: 53
+                  height: 30
+                  text: "--"
+                  text_align: CENTER
+                  text_font: montserrat_14
+                  text_color: 0xffffff
+                  checked: { text_color: 0x1a1a1a }
+                  long_mode: SCROLL_CIRCULAR
+              - label:
+                  id: lbl_l8_sub
+                  x: 0
+                  y: 80
+                  width: 53
+                  height: 20
+                  text: ""
+                  text_align: CENTER
+                  text_font: montserrat_12
+                  text_color: 0xa0a0a0
+                  checked: { text_color: 0x2a2a2a }
+            on_short_click:
+              - if:
+                  condition: { lambda: 'return !id(is_swiping);' }
+                  then:
+                    - homeassistant.action:
+                        action: touch_panel_manager.panel_action
+                        data:
+                          entity_id: !lambda 'return id(slot8_entity).state.c_str();'
+
+        # ═══════════════════ BOTTOM PAGE NAV (◀ Title 1/N ▶) ═══════════════════
+        # y=580..640 (60 px tall)
+
+        # Prev arrow (büyütüldü + pressed feedback)
+        - button:
+            id: btn_prev_page
+            x: 4
+            y: 580
+            width: 44
+            height: 56
+            bg_color: 0x1c2128
+            bg_opa: COVER
+            radius: 8
+            border_width: 0
+            pressed:
+              bg_color: 0x4a5260
+            widgets:
+              - label:
+                  text: "\U000F0141"
+                  text_font: font_icons
+                  text_color: 0xffffff
+                  align: CENTER
+            on_short_click:
+              - if:
+                  condition: { lambda: 'return !id(is_swiping);' }
+                  then:
+                    - script.execute: navigate_prev
+
+        # Page title + counter (orta)
+        - label:
+            id: lbl_page_title
+            x: 52
+            y: 584
+            width: 68
+            height: 26
+            text: "--"
+            text_align: CENTER
+            text_color: 0xffffff
+            text_font: montserrat_14
+            long_mode: SCROLL_CIRCULAR
+        - label:
+            id: lbl_page_counter
+            x: 52
+            y: 612
+            width: 68
+            height: 18
+            text: "1/1"
+            text_align: CENTER
+            text_color: 0xa0a0a0
+            text_font: montserrat_12
+
+        # Next arrow
+        - button:
+            id: btn_next_page
+            x: 124
+            y: 580
+            width: 44
+            height: 56
+            bg_color: 0x1c2128
+            bg_opa: COVER
+            radius: 8
+            border_width: 0
+            pressed:
+              bg_color: 0x4a5260
+            widgets:
+              - label:
+                  text: "\U000F0142"
+                  text_font: font_icons
+                  text_color: 0xffffff
+                  align: CENTER
+            on_short_click:
+              - if:
+                  condition: { lambda: 'return !id(is_swiping);' }
+                  then:
+                    - script.execute: navigate_next
+
+    # ═══════════════ DASHBOARD (yatay konumda otomatik geçer) ═══════════════
+    # Tüm içerik tek bir "rot_container" altında. Container 640×172 landscape
+    # kanvasında düşünülüyor, transform_angle:2700 (90° CCW) ile fiziksel
+    # 172×640 dikey ekrana oturuyor. Container'ı (x=172,y=0) pozisyonlayınca
+    # pivot (0,0) etrafında rotasyon ekranı tam kaplar.
+    # → Eğer cihaz ters yönde tutuluyorsa transform_angle: 900 yap (90° CW).
+    - id: scr_dashboard
+      scrollable: false
+      scrollbar_mode: 'OFF'
+      bg_color: 0x101418
+      bg_opa: COVER
+      widgets:
+        # Sağ-üst köşedeki inatçı piksel maskesi (rot_container'dan önce, en altta)
+        - obj:
+            x: 168
+            y: 0
+            width: 4
+            height: 4
+            bg_color: 0x101418
+            bg_opa: COVER
+            border_width: 0
+            pad_all: 0
+        - obj:
+            id: rot_container
+            x: 172
+            y: 0
+            width: 640
+            height: 172
+            bg_color: 0x101418
+            bg_opa: COVER
+            border_width: 0
+            pad_all: 0
+            scrollable: false
+            transform_rotation: 90
+            widgets:
+              # ─── BÜYÜK SAAT (yatay tam merkez, 100pt Bold)
+              - label:
+                  id: lbl_clock_big
+                  x: 70
+                  y: 30
+                  width: 500
+                  height: 110
+                  text: "--:--"
+                  text_align: CENTER
+                  text_color: 0xffffff
+                  text_font: font_clock_xl
+
+              # ─── Dış sıcaklık (yatay sol-ALT köşe)
+              - label:
+                  id: lbl_out_temp
+                  x: 10
+                  y: 138
+                  width: 150
+                  height: 30
+                  text: "--°"
+                  text_align: LEFT
+                  text_color: 0x60a5fa
+                  text_font: montserrat_22
+
+              # ─── İç sıcaklık (yatay sağ-ALT köşe)
+              - label:
+                  id: lbl_in_temp
+                  x: 480
+                  y: 138
+                  width: 150
+                  height: 30
+                  text: "--°"
+                  text_align: RIGHT
+                  text_color: 0xfbbf24
+                  text_font: montserrat_22
+
+              # ─── Sağ-üst status cluster: WiFi + yüzde + Pil bar (hepsi sağa yaslı)
+              - image:
+                  id: img_wifi_widget
+                  x: 540
+                  y: 8
+                  src: img_wifi_off
+
+              - label:
+                  id: lbl_batt_pct
+                  x: 568
+                  y: 10
+                  width: 30
+                  height: 20
+                  text: "--%"
+                  text_align: RIGHT
+                  text_color: 0xa0a0a0
+                  text_font: montserrat_14
+
+              # Pil gövdesi (dinamik dolan bar — yeşil/sarı/kırmızı)
+              - bar:
+                  id: bar_batt
+                  x: 605
+                  y: 10
+                  width: 26
+                  height: 14
+                  min_value: 0
+                  max_value: 100
+                  value: 50
+                  bg_color: 0x1a1f26
+                  bg_opa: COVER
+                  border_width: 2
+                  border_color: 0xa0a0a0
+                  radius: 3
+                  pad_all: 2
+                  indicator:
+                    bg_color: 0x10b981
+                    radius: 1
+
+              # Pil ucu (sağa doğru çıkıntı)
+              - obj:
+                  x: 631
+                  y: 14
+                  width: 3
+                  height: 6
+                  bg_color: 0xa0a0a0
+                  bg_opa: COVER
+                  border_width: 0
+                  radius: 1
+
+              # ─── Tarih (gizli, handler bağlı kalsın diye burada)
+              - label:
+                  id: lbl_date
+                  x: 0
+                  y: -100
+                  width: 50
+                  height: 20
+                  text: ""
+                  text_color: 0xa0a0a0
+                  text_font: montserrat_14
+
+# ─────────────────────────────────────────── Işık state'leri → buton görünümü
+# Açıkken sarı, kapalıyken koyu gri olur.
+# Not: aşağıdaki binary_sensor on_state'leri ile butonları senkronize ediyoruz.
+# (Yukarıda binary_sensor tanımları var; burada UI senkronizasyonu yapılıyor.)
+
+# Boot sırasında log:
+# I (NN) main: Boot OK. Cihazı HA'ya eklemek için Ayarlar > Cihazlar > ESPHome.
