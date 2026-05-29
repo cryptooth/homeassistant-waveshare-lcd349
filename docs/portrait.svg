@@ -8,7 +8,7 @@
 
   <!-- Slot 1: Light ON, yellow -->
   <rect x="6" y="60" width="77" height="125" rx="14" fill="#fbbf24"/>
-  <text x="44" y="38" font-size="32" fill="#1a1a1a" text-anchor="middle" transform="translate(0,25)">💡</text>
+  <text x="44" y="100" font-size="30" fill="#1a1a1a" text-anchor="middle">💡</text>
   <text x="44" y="135" font-size="14" font-weight="600" fill="#1a1a1a" text-anchor="middle">Ceiling</text>
   <text x="44" y="160" font-size="12" fill="#2a2a2a" text-anchor="middle">75%</text>
 
