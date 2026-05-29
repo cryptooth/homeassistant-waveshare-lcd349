@@ -8,6 +8,12 @@ control panel — all configurable from the HA UI without re-flashing.
 ![ESPHome](https://img.shields.io/badge/ESPHome-2026.5+-green)
 ![HA](https://img.shields.io/badge/Home%20Assistant-2024.11+-blue)
 
+<p align="center">
+  <img src="docs/portrait.svg" alt="Remote view" height="380">
+  &nbsp;&nbsp;
+  <img src="docs/landscape.svg" alt="Dashboard view" height="160">
+</p>
+
 ## Features
 
 - **HA-native configuration** — add pages and entities from a HA UI form, no
