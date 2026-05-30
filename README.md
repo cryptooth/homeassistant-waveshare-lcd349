@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/icon.svg" alt="Touch Panel Manager" width="120">
+</p>
+
 # Home Assistant Touch Panel — Waveshare ESP32-S3-Touch-LCD-3.49
 
 A Home Assistant custom integration **plus** ESPHome firmware that turns the

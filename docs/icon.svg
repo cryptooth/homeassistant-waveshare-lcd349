@@ -1,0 +1,37 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <!-- iOS-style rounded square background -->
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1c2128"/>
+      <stop offset="100%" stop-color="#0b0d10"/>
+    </linearGradient>
+    <linearGradient id="active" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#fde047"/>
+      <stop offset="100%" stop-color="#fbbf24"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="256" height="256" rx="56" fill="url(#bg)"/>
+
+  <!-- 2x2 grid of buttons (panel slots) -->
+  <!-- Top-left: ACTIVE (yellow) - has a small "touch dot" -->
+  <rect x="34" y="34" width="92" height="92" rx="18" fill="url(#active)"/>
+  <!-- subtle lightbulb hint -->
+  <circle cx="80" cy="68" r="14" fill="#1a1a1a" opacity="0.15"/>
+  <rect x="74" y="78" width="12" height="12" rx="2" fill="#1a1a1a" opacity="0.15"/>
+  <text x="80" y="108" font-family="system-ui, sans-serif" font-size="12" font-weight="700" fill="#1a1a1a" text-anchor="middle" opacity="0.4">ON</text>
+
+  <!-- Top-right: dim -->
+  <rect x="130" y="34" width="92" height="92" rx="18" fill="#1f2630"/>
+  <circle cx="176" cy="68" r="12" fill="#4a5260" opacity="0.6"/>
+
+  <!-- Bottom-left: dim -->
+  <rect x="34" y="130" width="92" height="92" rx="18" fill="#1f2630"/>
+  <rect x="64" y="162" width="32" height="22" rx="3" fill="#4a5260" opacity="0.6"/>
+  <rect x="58" y="158" width="44" height="4" rx="2" fill="#4a5260" opacity="0.6"/>
+
+  <!-- Bottom-right: dim, with thermometer hint (sensor slot) -->
+  <rect x="130" y="130" width="92" height="92" rx="18" fill="#1f2630"/>
+  <rect x="172" y="156" width="8" height="32" rx="4" fill="#60a5fa" opacity="0.6"/>
+  <circle cx="176" cy="192" r="9" fill="#60a5fa" opacity="0.6"/>
+</svg>
